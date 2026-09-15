@@ -1,6 +1,6 @@
-yt-dlp
-openai-whisper
+yt-dlp[default]
 groq
 edge-tts
 python-dotenv
 tqdm
+pydub
