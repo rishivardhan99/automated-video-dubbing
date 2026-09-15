@@ -1,0 +1,6 @@
+yt-dlp
+openai-whisper
+groq
+edge-tts
+python-dotenv
+tqdm

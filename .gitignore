@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment variables
+.env
+
+# Generated media
+data/input/*
+data/audio/*
+data/transcripts/*
+data/translations/*
+data/output/*
+
+# Keep directory structure
+!data/input/.gitkeep
+!data/audio/.gitkeep
+!data/transcripts/.gitkeep
+!data/translations/.gitkeep
+!data/output/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
