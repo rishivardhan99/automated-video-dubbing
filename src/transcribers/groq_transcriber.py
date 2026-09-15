@@ -390,15 +390,26 @@ class GroqTranscriber:
                 "Could not determine audio duration "
                 "for chunking."
             )
+            
+        file_size = audio_path.stat().st_size
+        
+        # Target ~20MB per chunk for safety
+        safe_chunk_size = 20 * 1024 * 1024
+        if file_size > safe_chunk_size:
+            ratio = safe_chunk_size / file_size
+            dynamic_chunk_duration = int(total_duration * ratio)
+            actual_chunk_duration = min(self.chunk_duration_s, dynamic_chunk_duration)
+        else:
+            actual_chunk_duration = self.chunk_duration_s
 
         chunk_count = math.ceil(
-            total_duration / self.chunk_duration_s
+            total_duration / actual_chunk_duration
         )
 
         chunks = []
 
         for i in range(chunk_count):
-            offset = i * self.chunk_duration_s
+            offset = i * actual_chunk_duration
 
             chunk_path = (
                 AUDIO_DIR
@@ -413,7 +424,7 @@ class GroqTranscriber:
                 "-ss",
                 str(offset),
                 "-t",
-                str(self.chunk_duration_s),
+                str(actual_chunk_duration),
                 "-c",
                 "copy",
                 str(chunk_path),

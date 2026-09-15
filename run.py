@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -20,6 +21,11 @@ from src.downloader import (
 from src.transcribers import (
     GroqTranscriber,
     TranscriptionError,
+)
+
+from src.separator import (
+    AudioSeparator,
+    SeparationError,
 )
 
 from src.translator import (
@@ -95,6 +101,7 @@ def main() -> None:
     except (
         DownloadError,
         AudioExtractionError,
+        SeparationError,
         TranscriptionError,
         TranslationError,
         SynthesisError,
@@ -208,13 +215,33 @@ def _run_benchmark(args, timings):
         f"Dubbed Audio:    {output_audio}"
     )
     
-    print("\n--- Synthesis Violations ---")
+    print("\n--- Synthesis Benchmarks ---")
+    
+    total_raw_tts = sum(m.raw_tts_duration for m in meta_report)
+    total_trimmed = sum(m.trimmed_tts_duration for m in meta_report)
+    avg_speed = sum(m.applied_speed_factor for m in meta_report) / max(len(meta_report), 1)
     violations = [m for m in meta_report if m.timing_violation]
+    truncated = [m for m in meta_report if m.truncated]
+    largest_overflow = max((m.overflow_ms for m in meta_report), default=0)
+    
+    print(f"Source Duration:          {audio_duration:.2f}s")
+    print(f"Number of Segments:       {len(meta_report)}")
+    print(f"Total Raw TTS Duration:   {total_raw_tts:.2f}s")
+    print(f"Total Trimmed Duration:   {total_trimmed:.2f}s")
+    print(f"Average Speed Factor:     {avg_speed:.2f}x")
+    print(f"Timing Violations:        {len(violations)}")
+    print(f"Truncated Segments:       {len(truncated)}")
+    print(f"Largest Overflow:         {largest_overflow}ms")
+
     if violations:
+        print("\n--- Timing Violations Details ---")
         for v in violations:
-            print(f"  [!] Segment {v.id}: generated {v.generated_duration:.2f}s for target {v.target_duration:.2f}s. Max 1.25x applied.")
-    else:
-        print("  None.")
+            msg = f"  [!] Segment {v.id}: Target {v.target_duration:.2f}s, Trimmed TTS {v.trimmed_tts_duration:.2f}s, Available {v.available_duration:.2f}s."
+            if v.truncated:
+                msg += f" TRUNCATED by {v.overflow_ms}ms."
+            else:
+                msg += f" Capped at {v.applied_speed_factor:.2f}x."
+            print(msg)
 
     print("\n--- Performance ---")
     for stage, t in timings.items():
@@ -257,13 +284,40 @@ def _run_pipeline(args, timings, total_start):
     print()
 
     # --------------------------------------------------
+    # STEP 2.5 — VOCAL SEPARATION
+    # --------------------------------------------------
+    
+    t0 = time.time()
+    separator = AudioSeparator(mode=os.getenv("AUDIO_SEPARATION", "none"))
+    sep_result = separator.separate(audio_path)
+    
+    if sep_result:
+        timings["Vocal Separation"] = sep_result.processing_time
+        
+        # Determine transcription input based on config
+        stt_mode = os.getenv("TRANSCRIPTION_AUDIO", "original").lower()
+        if stt_mode == "separated_vocals":
+            logger.info("Using separated vocals for transcription.")
+            transcription_input = sep_result.vocals_path
+        else:
+            logger.info("Using original audio for transcription.")
+            transcription_input = audio_path
+            
+        bg_music_path = sep_result.background_path
+    else:
+        transcription_input = audio_path
+        bg_music_path = None
+        
+    print()
+
+    # --------------------------------------------------
     # STEP 3 — GROQ TRANSCRIPTION
     # --------------------------------------------------
 
     t0 = time.time()
     transcriber = GroqTranscriber()
     transcript_path = transcriber.transcribe(
-        audio_path,
+        transcription_input,
     )
     transcription_time = time.time() - t0
     timings["Groq STT"] = transcription_time
@@ -327,6 +381,7 @@ def _run_pipeline(args, timings, total_start):
     output_audio, meta_report = synthesizer.synthesize(
         translation_path,
         audio_path,
+        bg_music_path=bg_music_path,
     )
     timings["Synthesis & Assembly"] = time.time() - t0
     

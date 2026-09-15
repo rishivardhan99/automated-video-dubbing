@@ -18,9 +18,10 @@ def extract_audio(video_path: Path) -> Path:
             f"Video file does not exist: {video_path}"
         )
 
-    AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    original_dir = AUDIO_DIR / "original"
+    original_dir.mkdir(parents=True, exist_ok=True)
 
-    audio_path = AUDIO_DIR / f"{video_path.stem}.wav"
+    audio_path = original_dir / f"{video_path.stem}.wav"
 
     command = [
         "ffmpeg",

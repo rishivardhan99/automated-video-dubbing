@@ -27,14 +27,18 @@ class SynthesisError(Exception):
 @dataclass
 class SegmentMetadata:
     id: int
-    start: float
-    end: float
+    source_start: float
+    source_end: float
     target_duration: float
-    generated_duration: float
-    speed_factor: float
+    raw_tts_duration: float
+    trimmed_tts_duration: float
+    required_speed_factor: float
     applied_speed_factor: float
+    available_duration: float
+    overflow_ms: int
     timing_violation: bool
-    generated_audio_path: str
+    truncated: bool
+    output_clip_path: str
 
 
 class EdgeTTSSynthesizer:
@@ -45,15 +49,40 @@ class EdgeTTSSynthesizer:
     ) -> None:
         self.voice = voice or os.getenv("EDGE_TTS_VOICE", "en-US-GuyNeural")
         self.max_retries = max_retries
+        self.silence_threshold = float(os.getenv("TTS_SILENCE_THRESHOLD_DB", "-40.0"))
+        self.min_silence_len = int(os.getenv("TTS_MIN_SILENCE_MS", "80"))
+        self.safety_pad = int(os.getenv("TTS_SAFETY_PAD_MS", "40"))
+        
+        self.ducking_enabled = os.getenv("BACKGROUND_DUCKING", "true").lower() == "true"
+        self.ducking_db = float(os.getenv("BACKGROUND_DUCK_DB", "8.0"))
+
+    def _trim_silence(self, audio_segment: AudioSegment) -> AudioSegment:
+        from pydub.silence import detect_nonsilent
+        nonsilent_ranges = detect_nonsilent(
+            audio_segment,
+            min_silence_len=self.min_silence_len,
+            silence_thresh=self.silence_threshold
+        )
+        if not nonsilent_ranges:
+            return audio_segment # no speech detected or very short
+
+        start_ms = nonsilent_ranges[0][0]
+        end_ms = nonsilent_ranges[-1][1]
+
+        start_ms = max(0, start_ms - self.safety_pad)
+        end_ms = min(len(audio_segment), end_ms + self.safety_pad)
+
+        return audio_segment[start_ms:end_ms]
 
     def synthesize(
         self,
         translation_path: Path,
         source_audio_path: Path,
+        bg_music_path: Path | None = None,
     ) -> tuple[Path, list[SegmentMetadata]]:
         """
         Generate TTS for all translated segments and assemble them
-        onto a canvas matching the exact duration of the source audio.
+        onto a canvas (either silent or background music).
         """
         
         if not translation_path.exists():
@@ -76,13 +105,16 @@ class EdgeTTSSynthesizer:
         if not segments:
             raise SynthesisError("Translation contains no segments.")
             
-        logger.info("Initializing synthesis canvas of duration %.2fs", source_duration_s)
-        
-        metadata_report = []
-        
         # Pydub works in milliseconds
-        canvas_duration_ms = int(source_duration_s * 1000)
-        canvas = AudioSegment.silent(duration=canvas_duration_ms)
+        if bg_music_path and bg_music_path.exists():
+            logger.info("Initializing synthesis canvas with background music from %s", bg_music_path.name)
+            canvas = AudioSegment.from_file(str(bg_music_path))
+            # Just to be safe, if Demucs shortened it slightly, we can pad it or let it be.
+            # Demucs should preserve exact length.
+        else:
+            logger.info("Initializing silent synthesis canvas of duration %.2fs", source_duration_s)
+            canvas_duration_ms = int(source_duration_s * 1000)
+            canvas = AudioSegment.silent(duration=canvas_duration_ms)
         
         # Base prefix for this job
         job_prefix = translation_path.stem
@@ -120,7 +152,7 @@ class EdgeTTSSynthesizer:
         
         metadata_report = []
         
-        for segment in segments:
+        for i, segment in enumerate(segments):
             seg_id = segment["id"]
             start_s = segment["start"]
             end_s = segment["end"]
@@ -128,79 +160,122 @@ class EdgeTTSSynthesizer:
             
             target_duration_s = end_s - start_s
             
+            # Pre-TTS sanity check
+            est_duration_s = len(text) / 15.0
+            if target_duration_s > 0 and (est_duration_s / target_duration_s) > 1.25:
+                logger.warning(
+                    "WARNING: segment %d translation likely exceeds available duration (est %.1fs vs target %.1fs)",
+                    seg_id, est_duration_s, target_duration_s
+                )
+
+            # Available duration (to prevent overlaps)
+            if i + 1 < len(segments):
+                available_duration_s = segments[i + 1]["start"] - start_s
+            else:
+                available_duration_s = end_s - start_s
+
             logger.info(
-                "Synthesizing segment %d (%.2fs - %.2fs, target duration: %.2fs)", 
-                seg_id, start_s, end_s, target_duration_s
+                "Synthesizing segment %d (%.2fs - %.2fs, target duration: %.2fs, available: %.2fs)", 
+                seg_id, start_s, end_s, target_duration_s, available_duration_s
             )
             
             raw_clip_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_raw.mp3"
             
-            # 1. Generate Raw TTS
+            # Variables for metadata tracking
+            raw_duration_s = 0.0
+            trimmed_duration_s = 0.0
+            required_speed_factor = 1.0
+            applied_speed_factor = 1.0
+            overflow_ms = 0
+            violation = False
+            truncated = False
+            final_clip_path = raw_clip_path
+            
+            # 1. Generate TTS
             if not text.strip():
                 logger.info("Segment %d text is empty. Creating silent placeholder.", seg_id)
                 audio_segment = AudioSegment.silent(duration=0)
-                # Create an empty file just in case it's needed for metadata
                 raw_clip_path.touch()
             else:
                 await self._generate_tts_with_retry(text, raw_clip_path)
-                audio_segment = AudioSegment.from_file(str(raw_clip_path))
-            
-            # 2. Measure actual duration
-            actual_duration_s = len(audio_segment) / 1000.0
-            
-            # 3. Calculate speed factor and decide action
-            # speed_factor = how much we need to speed it up to fit in target_duration
-            if target_duration_s <= 0:
-                speed_factor = 1.0 # Protect against zero div
-            else:
-                speed_factor = actual_duration_s / target_duration_s
+                raw_audio_segment = AudioSegment.from_file(str(raw_clip_path))
+                raw_duration_s = len(raw_audio_segment) / 1000.0
                 
-            applied_factor = 1.0
-            violation = False
+                # Trim silence
+                audio_segment = self._trim_silence(raw_audio_segment)
+                trimmed_duration_s = len(audio_segment) / 1000.0
+                removed_ms = len(raw_audio_segment) - len(audio_segment)
+                logger.info("Trimmed %d ms silence from segment %d. Raw: %.2fs, Trimmed: %.2fs", 
+                            removed_ms, seg_id, raw_duration_s, trimmed_duration_s)
+                
+                trimmed_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_trimmed.wav"
+                audio_segment.export(str(trimmed_path), format="wav")
+                
+                if target_duration_s > 0:
+                    required_speed_factor = trimmed_duration_s / target_duration_s
+
+                # Apply time-stretching logic
+                if required_speed_factor <= 1.05:
+                    final_clip_path = trimmed_path
+                else:
+                    if required_speed_factor <= 1.25:
+                        applied_speed_factor = required_speed_factor
+                    else:
+                        applied_speed_factor = 1.25
+                        violation = True
+                        logger.warning(
+                            "[TIMING VIOLATION] Segment %d generated %.2fs audio for %.2fs target. Max 1.25x stretch applied.",
+                            seg_id, trimmed_duration_s, target_duration_s
+                        )
+
+                    final_clip_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_stretched.wav"
+                    self._apply_atempo(trimmed_path, final_clip_path, applied_speed_factor)
+                    audio_segment = AudioSegment.from_file(str(final_clip_path))
+
+                # Overlap Prevention & Defensive Cutoff
+                final_duration_s = len(audio_segment) / 1000.0
+                if final_duration_s > available_duration_s:
+                    overflow_ms = int((final_duration_s - available_duration_s) * 1000)
+                    logger.warning("Segment %d overflows available duration by %d ms. Truncating with fade-out.", seg_id, overflow_ms)
+                    
+                    available_ms = int(available_duration_s * 1000)
+                    audio_segment = audio_segment[:available_ms].fade_out(30)
+                    truncated = True
+                    violation = True
             
-            if speed_factor <= 1.05:
-                # Leave unchanged
-                final_clip_path = raw_clip_path
-                applied_factor = 1.0
-            elif speed_factor <= 1.25:
-                # Apply exact required atempo
-                applied_factor = speed_factor
-                final_clip_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_stretched.wav"
-                self._apply_atempo(raw_clip_path, final_clip_path, applied_factor)
-                audio_segment = AudioSegment.from_file(str(final_clip_path))
-            else:
-                # Cap at 1.25 and flag violation
-                applied_factor = 1.25
-                violation = True
-                final_clip_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_stretched.wav"
-                self._apply_atempo(raw_clip_path, final_clip_path, applied_factor)
-                audio_segment = AudioSegment.from_file(str(final_clip_path))
-                
-                logger.warning(
-                    "[TIMING VIOLATION] Segment %d generated %.2fs audio for %.2fs target. "
-                    "Max 1.25x stretch applied.",
-                    seg_id, actual_duration_s, target_duration_s
-                )
-                
-            # 4. Record metadata
+            # Record metadata
             meta = SegmentMetadata(
                 id=seg_id,
-                start=start_s,
-                end=end_s,
+                source_start=start_s,
+                source_end=end_s,
                 target_duration=target_duration_s,
-                generated_duration=actual_duration_s,
-                speed_factor=speed_factor,
-                applied_speed_factor=applied_factor,
+                raw_tts_duration=raw_duration_s,
+                trimmed_tts_duration=trimmed_duration_s,
+                required_speed_factor=required_speed_factor,
+                applied_speed_factor=applied_speed_factor,
+                available_duration=available_duration_s,
+                overflow_ms=overflow_ms,
                 timing_violation=violation,
-                generated_audio_path=str(final_clip_path),
+                truncated=truncated,
+                output_clip_path=str(final_clip_path)
             )
             metadata_report.append(meta)
             
-            # 5. Place on timeline
+            # Place on timeline
             start_ms = int(start_s * 1000)
-            canvas = canvas.overlay(audio_segment, position=start_ms)
             
-            # No explicit cleanup needed since we are using tempfile.TemporaryDirectory
+            # Background ducking
+            if self.ducking_enabled and final_duration_s > 0:
+                end_ms = start_ms + int(final_duration_s * 1000)
+                # Ensure we don't try to duck past the canvas length
+                end_ms = min(end_ms, len(canvas))
+                if start_ms < len(canvas):
+                    before = canvas[:start_ms]
+                    during = canvas[start_ms:end_ms] - self.ducking_db
+                    after = canvas[end_ms:]
+                    canvas = before + during + after
+            
+            canvas = canvas.overlay(audio_segment, position=start_ms)
                 
         return canvas, metadata_report
 
