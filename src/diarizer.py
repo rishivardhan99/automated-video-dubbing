@@ -93,10 +93,29 @@ class PyAnnoteDiarizer:
 
         self._load_pipeline()
 
+        # Bypass torchaudio/torchcodec file loading bugs on Windows
+        # by using pydub to load the audio into a torch tensor explicitly.
+        from pydub import AudioSegment
+        import torch
+        import numpy as np
+
+        audio = AudioSegment.from_file(str(audio_path))
+        # Pyannote expects 16kHz mono audio by default
+        audio = audio.set_channels(1).set_frame_rate(16000)
+        
+        # Convert to numpy array of floats [-1.0, 1.0]
+        samples = np.array(audio.get_array_of_samples(), dtype=np.float32) / 32768.0
+        
+        # Pyannote pipeline accepts a dict with "waveform" (shape: Channels x Samples)
+        waveform = torch.from_numpy(samples).unsqueeze(0)
+        
         logger.info("Running speaker diarization on %s...", audio_path.name)
         t0 = time.time()
 
-        diarization_result = self._pipeline(str(audio_path))
+        diarization_result = self._pipeline({
+            "waveform": waveform,
+            "sample_rate": 16000
+        })
 
         processing_time = time.time() - t0
 
