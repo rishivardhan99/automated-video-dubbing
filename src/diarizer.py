@@ -74,6 +74,11 @@ class PyAnnoteDiarizer:
         try:
             self._pipeline = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1",
+                use_auth_token=self.hf_token,
+            )
+        except TypeError:
+            self._pipeline = Pipeline.from_pretrained(
+                "pyannote/speaker-diarization-3.1",
                 token=self.hf_token,
             )
         except Exception as exc:
