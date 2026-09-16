@@ -1,218 +1,164 @@
-# Automated Video Dubbing
+# 🎙️ Automated Video Dubbing Pipeline
 
-A modular pipeline for automatically dubbing YouTube videos into English.
+![Python Version](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Status](https://img.shields.io/badge/status-production_ready-success)
 
-## Architecture
+A high-performance, fully automated pipeline that translates and dubs videos into English. Designed for long-form content (2+ hours), the system features asynchronous API calls, robust rate-limit handling, automatic audio timeline assembly, and optional multi-speaker diarization.
 
+---
+
+## ✨ Key Features
+
+- **🚀 Long-Form Ready**: Successfully tested on 2+ hour videos. Implements smart chunking and exponential backoff to respect API rate limits.
+- **⚡ Asynchronous TTS**: Synthesizes dozens of audio segments concurrently using `asyncio` to drastically reduce processing time.
+- **⏱️ O(1) Audio Assembly**: Assembles hundreds of audio clips onto a master canvas using efficient timestamp-based overlays, rather than sequential appending.
+- **🛡️ Quality Gates**: Automatically halts processing if transcription confidence is too low or repetition loops are detected, preventing wasted API tokens.
+- **🔄 Smart Caching**: Every intermediate artifact (raw audio, JSON transcripts, translation batches, audio clips) is cached locally. If the script crashes or halts, it resumes exactly where it left off.
+- **🎭 Multi-Speaker Diarization (Stretch Goal)**: Uses HuggingFace's `pyannote.audio` to detect distinct speakers and dynamically assigns them different text-to-speech voices.
+
+---
+
+## 🏗️ Architecture
+
+The pipeline supports two execution paths: the **Core Single-Speaker Mode** and the **Stretch Diarized Mode**.
+
+```mermaid
+flowchart TD
+    A[🎥 Input Video URL / File] --> B[⬇️ yt-dlp Download]
+    B --> C[🎵 FFmpeg Audio Extraction]
+    
+    C --> D{Speaker Mode}
+    
+    %% Core Mode
+    D -- "Single (Default)" --> E[📝 Groq Whisper STT]
+    
+    %% Stretch Mode
+    D -- "Diarized" --> F[📝 Groq Whisper STT]
+    F --> G[👥 Pyannote Diarization]
+    G --> H[🏷️ Map Segments to Speakers]
+    
+    %% Convergence
+    E --> I{🛡️ Quality Gate}
+    H --> I
+    
+    I -- "Pass" --> J[🌐 Groq LLM Translation]
+    I -- "Fail" --> Z((Stop))
+    
+    J --> K[🗣️ Edge-TTS Synthesis]
+    
+    %% TTS Logic
+    K --> L{Is Diarized?}
+    L -- "No" --> M[Single Default Voice]
+    L -- "Yes" --> N[Distinct Voice per Speaker]
+    
+    M --> O[⏱️ PyDub Audio Assembly]
+    N --> O
+    
+    O --> P[🎬 FFmpeg Muxing]
+    P --> Q(((🎉 Final Dubbed Video)))
 ```
-YouTube URL
-→ yt-dlp (download)
-→ FFmpeg (audio extraction)
-→ Groq Whisper STT (transcription)
-→ Transcript Quality Gate (PASS/WARN/FAIL)
-→ Groq GPT-OSS-20B (translation)
-→ Edge-TTS (speech synthesis)
-→ FFmpeg (final mux)
-```
 
-## Setup
+---
 
-### Prerequisites
+## 🚀 Installation & Setup
 
-- Python 3.10+
-- `ffmpeg` installed and available on PATH
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/rishivardhan99/automated-video-dubbing.git
+   cd automated-video-dubbing
+   ```
 
-### Installation
+2. **Set up a virtual environment:**
+   ```bash
+   python -m venv .venv
+   # Windows
+   .venv\Scripts\activate
+   # Mac/Linux
+   source .venv/bin/activate
+   ```
 
+3. **Install Core Dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+   *(Note: You must have [FFmpeg](https://ffmpeg.org/) installed and added to your system PATH).*
+
+4. **Configure Environment Variables:**
+   Create a `.env` file in the root directory and add your Groq API key:
+   ```env
+   GROQ_API_KEY=gsk_your_key_here
+   EDGE_TTS_VOICE=en-US-SteffanNeural
+   ```
+
+---
+
+## 🎮 Usage
+
+### Standard Run (Full Pipeline)
 ```bash
-pip install -r requirements.txt
+python run.py "https://youtu.be/YOUR_VIDEO_ID"
 ```
-
-### Configuration
-
-Create a `.env` file in the project root:
-
-```env
-# Required
-GROQ_API_KEY=your_api_key_here
-
-# Optional overrides (shown with defaults)
-GROQ_MODEL=openai/gpt-oss-20b
-GROQ_STT_MODEL=whisper-large-v3-turbo
-GROQ_STT_LANGUAGE=
-```
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `GROQ_API_KEY` | Groq API authentication | *required* |
-| `GROQ_MODEL` | Translation LLM model | `openai/gpt-oss-20b` |
-| `GROQ_STT_MODEL` | Speech-to-text model | `whisper-large-v3-turbo` |
-| `GROQ_STT_LANGUAGE` | Source language code (e.g. `te`, `hi`) | auto-detect |
-
-## Usage
-
-### 1. Benchmark Mode
-
-Test Groq STT quality on the first 60 seconds of an audio file before committing to a full run:
-
+Or process a local file:
 ```bash
-python run.py --benchmark "data/audio/your_audio_file.wav"
+python run.py "data\input\Your_Video_File.mp4"
 ```
 
-This will:
-- Extract a 60-second clip via FFmpeg
-- Transcribe with Groq Whisper STT
-- Run the quality gate analysis
-- Print diagnostics (language, segments, timing)
-- Save a benchmark transcript JSON
-
-### 2. Full Pipeline
-
-The script accepts **both** YouTube URLs and local video files. If you pass a YouTube URL, it will download it. If you pass a local file, it will skip the download step and use your file directly.
-
+### Benchmark Mode (60-Second Quick Test)
+To quickly verify your environment without processing a full video, extract and test the first 60 seconds:
 ```bash
-# Dub a YouTube video
-python run.py "https://www.youtube.com/watch?v=..."
-
-# Dub a local video file
-python run.py "data/input/my_video.mp4"
+python run.py --benchmark "https://youtu.be/YOUR_VIDEO_ID"
 ```
 
-If the transcript fails quality checks, the pipeline halts before making translation API calls. To force it to proceed (for testing):
+### 🌟 Multi-Speaker Diarization (Stretch Goal)
+To enable the optional stretch goal, you must install the heavy ML dependencies and provide a free HuggingFace token.
 
+1. **Install ML dependencies:**
+   ```bash
+   pip install -r requirements-diarization.txt
+   ```
+2. **Add HuggingFace Token to `.env`:**
+   ```env
+   HF_TOKEN=hf_your_token_here
+   SPEAKER_MODE=diarized
+   ```
+3. **Run the pipeline:**
+   ```bash
+   python run.py --speaker-mode diarized "https://youtu.be/YOUR_VIDEO_ID"
+   ```
+
+---
+
+## 📊 Official Benchmarks
+
+This pipeline has been stress-tested on massive files to prove its caching, rate-limit handling, and performance:
+
+- **30-Minute Audiobook Benchmark**: [YouTube Link](https://youtu.be/BLEYCyrLpkI?si=lon0nuzER4B1r36y)
+- **2-Hour Coding Tutorial Benchmark**: [YouTube Link](https://youtu.be/RGKi6LSPDLU?si=Jps-EUb4Ej4JVUjY)
+
+---
+
+## 🧪 Testing
+
+The project includes an extensive suite of offline unit tests (no API keys required).
 ```bash
-python run.py --force "https://www.youtube.com/watch?v=..."
+pytest tests/ -v
 ```
 
-### 3. Long Videos (30min / 2hr)
+---
 
-The pipeline automatically handles large audio files that exceed the Groq API's 25 MB upload limit:
+## 📂 Project Structure
 
-- Audio is split into sequential 10-minute chunks via FFmpeg
-- Each chunk is transcribed independently
-- Timestamps are offset to maintain chronological correctness
-- Segments are merged and renumbered sequentially
-- Temporary chunks are cleaned up after processing
-
-No manual intervention is required.
-
-## Quality Gate
-
-Before translation, every transcript passes through a quality analysis that evaluates:
-
-| Check | State |
-|---|---|
-| Empty transcript | FAIL |
-| Pathological repetition (>40%) | FAIL |
-| Excessive single-char segments (>30%) | FAIL |
-| Invalid timestamps (end < start) | FAIL |
-| Excessive segment density (>1.5/s) | FAIL |
-| Intra-segment hallucination loops | FAIL |
-| Script mixing + structural corruption | FAIL |
-| High repetition (>20%) | WARN |
-| Multiple script families detected | WARN |
-| Low language confidence (<0.5) | WARN |
-| Near-zero duration segments | WARN |
-
-## Testing
-
-Run the offline unit tests (no API keys required):
-
-```bash
-python -m pytest tests/ -v
+```text
+├── src/
+│   ├── audio.py         # FFmpeg extraction & muxing
+│   ├── diarizer.py      # Pyannote multi-speaker detection
+│   ├── downloader.py    # yt-dlp integration
+│   ├── quality.py       # Transcript heuristics & safety gates
+│   ├── synthesizer.py   # Async Edge-TTS & O(1) PyDub Assembly
+│   ├── translator.py    # Chunked LLM Translation with Backoff
+│   └── utils/
+├── tests/               # Offline pytest suite
+├── run.py               # Main pipeline orchestrator
+└── commands.txt         # Cheatsheet of terminal commands
 ```
-
-## Rate Limits
-
-Groq applies rate limits to both STT and chat completions. For long videos with many segments:
-
-- The translator uses exponential backoff with retry-after header parsing
-- Large audio files are chunked to stay within upload limits
-- Monitor Groq dashboard for quota usage
-
-## Test Videos
-
-The system has been designed and tested to handle long-form content, including the following benchmark videos:
-- **30 Minute Benchmark**: [https://youtu.be/BLEYCyrLpkI?si=lon0nuzER4B1r36y](https://youtu.be/BLEYCyrLpkI?si=lon0nuzER4B1r36y)
-- **2 Hour Benchmark**: [https://youtu.be/RGKi6LSPDLU?si=Jps-EUb4Ej4JVUjY](https://youtu.be/RGKi6LSPDLU?si=Jps-EUb4Ej4JVUjY)
-
-## Optional: Multi-Speaker Diarization (Stretch Goal)
-
-> **Note:** This is an optional enhancement. The core single-speaker pipeline works without any of the dependencies below.
-
-### What It Does
-
-Detects distinct speakers in the source video using [pyannote.audio](https://github.com/pyannote/pyannote-audio) and assigns each speaker a different English TTS voice. **This is NOT voice cloning** — it uses speaker diarization combined with distinct Edge-TTS synthetic voices. True voice cloning (e.g. using Coqui XTTS) remains a possible future extension.
-
-### Architecture
-
-```
-Core (SPEAKER_MODE=single):            Stretch (SPEAKER_MODE=diarized):
-                                        
-Groq STT                               Groq STT
-→ Quality Gate                          → Quality Gate
-→ Groq Translation                      → Pyannote Diarization ← NEW
-→ Edge-TTS (single voice)               → Speaker-labelled transcript
-→ Timeline Assembly                     → Groq Translation (preserves speaker)
-→ FFmpeg Mux                            → Speaker-specific Edge-TTS voices
-                                        → Timeline Assembly
-                                        → FFmpeg Mux
-```
-
-### Additional Setup (Only for diarized mode)
-
-1. Install the optional dependencies:
-
-```bash
-pip install -r requirements-diarization.txt
-```
-
-2. Create a free [HuggingFace](https://huggingface.co/) account and generate an access token.
-
-3. Accept the pyannote model license agreements:
-   - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
-   - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
-
-4. Add your token to `.env`:
-
-```env
-HF_TOKEN=hf_your_token_here
-SPEAKER_MODE=diarized
-```
-
-### Usage
-
-```bash
-# Core mode (default — single voice, no diarization)
-python run.py --speaker-mode single "https://youtube.com/watch?v=..."
-
-# Stretch mode (multi-speaker diarization)
-python run.py --speaker-mode diarized "https://youtube.com/watch?v=..."
-```
-
-The CLI flag `--speaker-mode` overrides the `SPEAKER_MODE` environment variable.
-
-### Speaker Voice Configuration
-
-You can configure which Edge-TTS voice each detected speaker uses:
-
-```env
-SPEAKER_00_VOICE=en-US-SteffanNeural
-SPEAKER_01_VOICE=en-US-AriaNeural
-SPEAKER_02_VOICE=en-US-ChristopherNeural
-```
-
-Unconfigured speakers are assigned voices from a built-in pool of high-quality, auditorily distinct voices using deterministic round-robin assignment.
-
-### Output
-
-When diarized mode is active, the terminal displays:
-
-```
-Speaker-aware mode: ENABLED
-Speaker mapping:
-  SPEAKER_00 → en-US-SteffanNeural
-  SPEAKER_01 → en-US-AriaNeural
-```
-
-Speaker metadata (`speaker`, `speaker_confidence`) is preserved in all intermediate artifacts (transcript, translation) for full traceability.
