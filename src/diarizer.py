@@ -56,6 +56,8 @@ class PyAnnoteDiarizer:
                 torchaudio.AudioMetaData = _DummyMetaData
                 if not hasattr(torchaudio, "info"):
                     torchaudio.info = lambda *args, **kwargs: _DummyMetaData()
+            if not hasattr(torchaudio, "list_audio_backends"):
+                torchaudio.list_audio_backends = lambda: ["soundfile"]
 
             from pyannote.audio import Pipeline
         except ImportError as exc:
