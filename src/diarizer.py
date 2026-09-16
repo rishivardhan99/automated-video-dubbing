@@ -48,6 +48,26 @@ class PyAnnoteDiarizer:
             return
 
         try:
+            import torch
+            import torch.serialization
+
+            # PyTorch >= 2.6 defaults weights_only=True, which blocks many globals
+            # used by pyannote model checkpoints (TorchVersion, Specifications, etc.).
+            # Rather than allowlisting each class individually, patch the underlying
+            # torch.serialization.load to default weights_only=False.
+            # We patch torch.serialization.load (the real function) so that all
+            # callers — including pyannote's internal `from torch import load` — see it.
+            _orig_ser_load = torch.serialization.load
+            if not getattr(_orig_ser_load, "_patched_pyannote", False):
+                def _patched_load(*args, **kwargs):
+                    # Force weights_only=False — lightning_fabric passes None
+                    # which PyTorch 2.14 treats as True, blocking pyannote globals
+                    kwargs["weights_only"] = False
+                    return _orig_ser_load(*args, **kwargs)
+                _patched_load._patched_pyannote = True
+                torch.serialization.load = _patched_load
+                torch.load = _patched_load
+
             # Patch torchaudio to prevent AttributeError in newer versions
             import torchaudio
             if not hasattr(torchaudio, "AudioMetaData"):
@@ -58,6 +78,17 @@ class PyAnnoteDiarizer:
                     torchaudio.info = lambda *args, **kwargs: _DummyMetaData()
             if not hasattr(torchaudio, "list_audio_backends"):
                 torchaudio.list_audio_backends = lambda: ["soundfile"]
+
+            # Patch huggingface_hub to support deprecated use_auth_token (pyannote.audio <= 3.1)
+            import huggingface_hub
+            if not getattr(huggingface_hub.hf_hub_download, "_patched", False):
+                orig_hf_hub_download = huggingface_hub.hf_hub_download
+                def patched_hf_hub_download(*args, **kwargs):
+                    if "use_auth_token" in kwargs:
+                        kwargs["token"] = kwargs.pop("use_auth_token")
+                    return orig_hf_hub_download(*args, **kwargs)
+                patched_hf_hub_download._patched = True
+                huggingface_hub.hf_hub_download = patched_hf_hub_download
 
             from pyannote.audio import Pipeline
         except ImportError as exc:
@@ -72,14 +103,10 @@ class PyAnnoteDiarizer:
         t0 = time.time()
 
         try:
+            # We already patched hf_hub_download to accept use_auth_token
             self._pipeline = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1",
                 use_auth_token=self.hf_token,
-            )
-        except TypeError:
-            self._pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=self.hf_token,
             )
         except Exception as exc:
             raise DiarizationError(
