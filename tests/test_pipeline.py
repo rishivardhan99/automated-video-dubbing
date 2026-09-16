@@ -489,10 +489,10 @@ def test_chunked_segment_merge_order():
 
 
 def test_translator_batching():
-    translator = GroqTranslator(
-        max_input_chars=10,
-        max_retries=1,
-    )
+    with patch.dict("os.environ", {"GROQ_API_KEY": "fake", "TRANSLATION_MAX_SEGMENTS": "2"}):
+        translator = GroqTranslator(
+            max_retries=1,
+        )
 
     segments = [
         {
@@ -610,6 +610,7 @@ def test_translator_validation_fail_reordered():
 
 
 def test_translator_validation_fail_empty_text():
+    """Empty-string translations are now allowed (for gibberish segments)."""
     source_segments = [
         {
             "id": 0,
@@ -622,14 +623,12 @@ def test_translator_validation_fail_empty_text():
         {"id": 0, "translated_text": "   "}
     ]
 
-    with pytest.raises(
-        TranslationError,
-        match="Empty translation",
-    ):
-        GroqTranslator._validate_batch(
-            source_segments,
-            translated,
-        )
+    # Should NOT raise — empty strings are explicitly allowed
+    result = GroqTranslator._validate_batch(
+        source_segments,
+        translated,
+    )
+    assert len(result) == 1
 
 
 def test_translator_validation_fail_wrong_count():
@@ -684,4 +683,5 @@ def test_groq_retry_delay_parsing():
     delay3 = GroqTranslator._get_retry_delay(
         exc3, attempt=3
     )
-    assert delay3 == 4.0
+    # Base delay is 4.0 + random jitter [0.1, 1.0]
+    assert 4.0 <= delay3 <= 5.0

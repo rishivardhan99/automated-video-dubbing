@@ -1,0 +1,68 @@
+# Automated Video Dubbing - Command Cheatsheet
+# Use these commands for your demonstration or walkthrough video!
+
+============================================================
+1. FULL PIPELINE (FROM YOUTUBE URL)
+============================================================
+Downloads the video, transcribes, translates, synthesizes audio, and muxes it back together.
+
+Command:
+python run.py "https://youtu.be/YOUR_VIDEO_ID"
+
+============================================================
+2. FULL PIPELINE (FROM LOCAL FILE)
+============================================================
+Bypasses the YouTube download step entirely and uses an already-downloaded video. 
+Great for avoiding YouTube bot detection or continuing where you left off.
+
+Command:
+python run.py "data\input\Your_Video_File.mp4"
+
+============================================================
+3. FORCE PIPELINE (IGNORE QUALITY GATE)
+============================================================
+If the transcript quality gate fails (e.g., low language confidence, too much repetition), 
+the script halts to save you API tokens. Use --force to push through the gate anyway.
+
+Command:
+python run.py --force "https://youtu.be/YOUR_VIDEO_ID"
+python run.py --force "data\input\Your_Video_File.mp4"
+
+============================================================
+4. BENCHMARK MODE (60-SECOND TEST)
+============================================================
+Extracts only the first 60 seconds of a local audio/video file to quickly test transcription, 
+translation, and text-to-speech quality before committing to a 2-hour run.
+
+Command:
+python run.py --benchmark "data\audio\original\Your_Audio_File.wav"
+python run.py --benchmark "data\input\Your_Video_File.mp4"
+
+============================================================
+5. RUN UNIT TESTS
+============================================================
+Run all the offline unit tests (tests quality gates, deduplication, translation structure, etc.) 
+without making any API calls.
+
+Command:
+pytest tests/ -v
+
+============================================================
+6. MULTI-SPEAKER DIARIZATION (STRETCH GOAL)
+============================================================
+Detects distinct speakers and assigns each a different Edge-TTS voice.
+Requires: pip install -r requirements-diarization.txt
+Requires: HF_TOKEN in .env (free HuggingFace token)
+
+Command:
+python run.py --speaker-mode diarized "https://youtu.be/YOUR_VIDEO_ID"
+python run.py --speaker-mode diarized "data\input\Your_Video_File.mp4"
+
+============================================================
+7. EXPLICIT SINGLE-SPEAKER MODE
+============================================================
+Explicitly forces single-speaker mode (the default). Useful for
+overriding SPEAKER_MODE=diarized in your .env without editing it.
+
+Command:
+python run.py --speaker-mode single "https://youtu.be/YOUR_VIDEO_ID"

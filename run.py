@@ -80,7 +80,25 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--speaker-mode",
+        choices=["single", "diarized"],
+        default=None,
+        help=(
+            "Speaker mode: 'single' (default) uses one "
+            "TTS voice for all segments. 'diarized' detects "
+            "distinct speakers and assigns each a different "
+            "Edge-TTS voice. Overrides SPEAKER_MODE env var."
+        ),
+    )
+
     args = parser.parse_args()
+
+    # Resolve speaker mode: CLI overrides env var
+    args.speaker_mode = (
+        args.speaker_mode
+        or os.getenv("SPEAKER_MODE", "single").lower()
+    )
 
     timings = {}
 
@@ -89,6 +107,12 @@ def main() -> None:
         print("=" * 60)
         print("AUTOMATED VIDEO DUBBING")
         print("=" * 60)
+        print()
+
+        if args.speaker_mode == "diarized":
+            print("Speaker-aware mode: ENABLED")
+        else:
+            print("Speaker-aware mode: DISABLED")
         print()
 
         total_start = time.time()
@@ -365,6 +389,59 @@ def _run_pipeline(args, timings, total_start):
         sys.exit(1)
 
     # --------------------------------------------------
+    # STEP 3.7 — SPEAKER DIARIZATION (OPTIONAL)
+    # --------------------------------------------------
+
+    speaker_voice_map = None
+
+    if args.speaker_mode == "diarized":
+        t0 = time.time()
+
+        # Lazy import — only when diarized mode is active
+        from src.diarizer import PyAnnoteDiarizer, DiarizationError
+        from src.speaker_voices import build_speaker_voice_map
+
+        try:
+            diarizer = PyAnnoteDiarizer()
+            speaker_intervals = diarizer.diarize(audio_path)
+
+            # Assign speaker labels to transcript segments
+            with transcript_path.open("r", encoding="utf-8") as f:
+                transcript_data_for_diar = json.load(f)
+
+            labelled_segments = diarizer.assign_speakers(
+                transcript_data_for_diar["segments"],
+                speaker_intervals,
+            )
+
+            # Save updated transcript with speaker labels
+            transcript_data_for_diar["segments"] = labelled_segments
+            with transcript_path.open("w", encoding="utf-8") as f:
+                json.dump(
+                    transcript_data_for_diar, f,
+                    ensure_ascii=False, indent=2,
+                )
+
+            # Build speaker-to-voice mapping
+            detected_speakers = set(
+                s["speaker"] for s in labelled_segments
+                if s["speaker"] != "SPEAKER_UNKNOWN"
+            )
+            logger.info("Speaker mapping:")
+            speaker_voice_map = build_speaker_voice_map(
+                detected_speakers,
+                default_voice=os.getenv("EDGE_TTS_VOICE", "en-US-GuyNeural"),
+            )
+
+        except DiarizationError as exc:
+            logger.error("Diarization failed: %s", exc)
+            print(f"\n[!] Diarization error: {exc}")
+            sys.exit(1)
+
+        timings["Diarization"] = time.time() - t0
+        print()
+
+    # --------------------------------------------------
     # STEP 4 — GROQ TRANSLATION
     # --------------------------------------------------
 
@@ -384,7 +461,9 @@ def _run_pipeline(args, timings, total_start):
     # --------------------------------------------------
 
     t0 = time.time()
-    synthesizer = EdgeTTSSynthesizer()
+    synthesizer = EdgeTTSSynthesizer(
+        speaker_voice_map=speaker_voice_map,
+    )
     output_audio, meta_report = synthesizer.synthesize(
         translation_path,
         audio_path,

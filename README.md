@@ -135,3 +135,84 @@ Groq applies rate limits to both STT and chat completions. For long videos with 
 The system has been designed and tested to handle long-form content, including the following benchmark videos:
 - **30 Minute Benchmark**: [https://youtu.be/BLEYCyrLpkI?si=lon0nuzER4B1r36y](https://youtu.be/BLEYCyrLpkI?si=lon0nuzER4B1r36y)
 - **2 Hour Benchmark**: [https://youtu.be/RGKi6LSPDLU?si=Jps-EUb4Ej4JVUjY](https://youtu.be/RGKi6LSPDLU?si=Jps-EUb4Ej4JVUjY)
+
+## Optional: Multi-Speaker Diarization (Stretch Goal)
+
+> **Note:** This is an optional enhancement. The core single-speaker pipeline works without any of the dependencies below.
+
+### What It Does
+
+Detects distinct speakers in the source video using [pyannote.audio](https://github.com/pyannote/pyannote-audio) and assigns each speaker a different English TTS voice. **This is NOT voice cloning** — it uses speaker diarization combined with distinct Edge-TTS synthetic voices. True voice cloning (e.g. using Coqui XTTS) remains a possible future extension.
+
+### Architecture
+
+```
+Core (SPEAKER_MODE=single):            Stretch (SPEAKER_MODE=diarized):
+                                        
+Groq STT                               Groq STT
+→ Quality Gate                          → Quality Gate
+→ Groq Translation                      → Pyannote Diarization ← NEW
+→ Edge-TTS (single voice)               → Speaker-labelled transcript
+→ Timeline Assembly                     → Groq Translation (preserves speaker)
+→ FFmpeg Mux                            → Speaker-specific Edge-TTS voices
+                                        → Timeline Assembly
+                                        → FFmpeg Mux
+```
+
+### Additional Setup (Only for diarized mode)
+
+1. Install the optional dependencies:
+
+```bash
+pip install -r requirements-diarization.txt
+```
+
+2. Create a free [HuggingFace](https://huggingface.co/) account and generate an access token.
+
+3. Accept the pyannote model license agreements:
+   - [pyannote/speaker-diarization-3.1](https://huggingface.co/pyannote/speaker-diarization-3.1)
+   - [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0)
+
+4. Add your token to `.env`:
+
+```env
+HF_TOKEN=hf_your_token_here
+SPEAKER_MODE=diarized
+```
+
+### Usage
+
+```bash
+# Core mode (default — single voice, no diarization)
+python run.py --speaker-mode single "https://youtube.com/watch?v=..."
+
+# Stretch mode (multi-speaker diarization)
+python run.py --speaker-mode diarized "https://youtube.com/watch?v=..."
+```
+
+The CLI flag `--speaker-mode` overrides the `SPEAKER_MODE` environment variable.
+
+### Speaker Voice Configuration
+
+You can configure which Edge-TTS voice each detected speaker uses:
+
+```env
+SPEAKER_00_VOICE=en-US-SteffanNeural
+SPEAKER_01_VOICE=en-US-AriaNeural
+SPEAKER_02_VOICE=en-US-ChristopherNeural
+```
+
+Unconfigured speakers are assigned voices from a built-in pool of high-quality, auditorily distinct voices using deterministic round-robin assignment.
+
+### Output
+
+When diarized mode is active, the terminal displays:
+
+```
+Speaker-aware mode: ENABLED
+Speaker mapping:
+  SPEAKER_00 → en-US-SteffanNeural
+  SPEAKER_01 → en-US-AriaNeural
+```
+
+Speaker metadata (`speaker`, `speaker_confidence`) is preserved in all intermediate artifacts (transcript, translation) for full traceability.

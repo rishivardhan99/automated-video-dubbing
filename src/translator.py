@@ -93,16 +93,21 @@ class GroqTranslator:
                 "Skipping Groq translation."
             )
 
-            translated_segments = [
-                {
+            translated_segments = []
+            for segment in segments:
+                seg = {
                     "id": segment["id"],
                     "start": segment["start"],
                     "end": segment["end"],
                     "source_text": segment["text"],
                     "translated_text": segment["text"],
                 }
-                for segment in segments
-            ]
+                # Preserve speaker metadata from diarization
+                if "speaker" in segment:
+                    seg["speaker"] = segment["speaker"]
+                if "speaker_confidence" in segment:
+                    seg["speaker_confidence"] = segment["speaker_confidence"]
+                translated_segments.append(seg)
 
         else:
             video_id = transcript_path.stem
@@ -636,6 +641,13 @@ Return translations ONLY for the TARGET SEGMENTS using the required JSON schema.
                     "end": source["end"],
                     "source_text": source["text"],
                     "translated_text": translated_text,
+                    # Preserve speaker metadata from diarization
+                    **({
+                        "speaker": source["speaker"],
+                    } if "speaker" in source else {}),
+                    **({
+                        "speaker_confidence": source["speaker_confidence"],
+                    } if "speaker_confidence" in source else {}),
                 }
             )
 

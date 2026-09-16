@@ -1,0 +1,6 @@
+# Optional dependencies for multi-speaker diarization (stretch goal).
+# Only install these if you want to use SPEAKER_MODE=diarized.
+# The core pipeline (SPEAKER_MODE=single) does NOT need these.
+torch
+torchaudio
+pyannote.audio

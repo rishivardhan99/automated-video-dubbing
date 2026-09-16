@@ -47,8 +47,10 @@ class EdgeTTSSynthesizer:
         self,
         voice: str | None = None,
         max_retries: int = 3,
+        speaker_voice_map: dict[str, str] | None = None,
     ) -> None:
         self.voice = voice or os.getenv("EDGE_TTS_VOICE", "en-US-GuyNeural")
+        self.speaker_voice_map = speaker_voice_map
         self.max_retries = max_retries
         self.silence_threshold = float(os.getenv("TTS_SILENCE_THRESHOLD_DB", "-40.0"))
         self.min_silence_len = int(os.getenv("TTS_MIN_SILENCE_MS", "80"))
@@ -179,7 +181,8 @@ class EdgeTTSSynthesizer:
 
                 # Available duration (to prevent overlaps, but allow natural length)
                 if i + 1 < len(segments):
-                    available_duration_s = max(target_duration_s, segments[i + 1]["start"] - start_s)
+                    available_duration_s = max(0.1, segments[i + 1]["start"] - start_s)
+                    target_duration_s = min(target_duration_s, available_duration_s)
                 else:
                     available_duration_s = target_duration_s
 
@@ -207,7 +210,16 @@ class EdgeTTSSynthesizer:
                     raw_clip_path.touch()
                     final_duration_s = 0.0
                 else:
-                    await self._generate_tts_with_retry(text, raw_clip_path)
+                    # Determine voice for this segment
+                    segment_voice = self.voice
+                    if self.speaker_voice_map and "speaker" in segment:
+                        segment_voice = self.speaker_voice_map.get(
+                            segment["speaker"], self.voice
+                        )
+
+                    await self._generate_tts_with_retry(
+                        text, raw_clip_path, voice=segment_voice,
+                    )
                     
                     # Offload pydub I/O to a thread so we don't block asyncio loop
                     def process_audio():
@@ -234,13 +246,13 @@ class EdgeTTSSynthesizer:
                     if required_speed_factor <= 1.05:
                         final_clip_path = trimmed_path
                     else:
-                        if required_speed_factor <= 1.25:
+                        if required_speed_factor <= 1.5:
                             applied_speed_factor = required_speed_factor
                         else:
-                            applied_speed_factor = 1.25
+                            applied_speed_factor = 1.5
                             violation = True
                             logger.debug(
-                                "[TIMING VIOLATION] Segment %d generated %.2fs audio for %.2fs target. Max 1.25x stretch applied.",
+                                "[TIMING VIOLATION] Segment %d generated %.2fs audio for %.2fs target. Max 1.5x stretch applied.",
                                 seg_id, trimmed_duration_s, target_duration_s
                             )
 
@@ -325,11 +337,17 @@ class EdgeTTSSynthesizer:
         logger.info("Assembly complete!")
         return canvas, metadata_report
 
-    async def _generate_tts_with_retry(self, text: str, output_path: Path) -> None:
+    async def _generate_tts_with_retry(
+        self,
+        text: str,
+        output_path: Path,
+        voice: str | None = None,
+    ) -> None:
         """Generate TTS using edge-tts with bounded retries."""
+        effective_voice = voice or self.voice
         for attempt in range(1, self.max_retries + 1):
             try:
-                communicate = edge_tts.Communicate(text, self.voice)
+                communicate = edge_tts.Communicate(text, effective_voice)
                 await communicate.save(str(output_path))
                 
                 if not output_path.exists():
