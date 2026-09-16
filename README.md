@@ -13,7 +13,9 @@ A high-performance, fully automated pipeline that translates and dubs videos int
 - **🚀 Long-Form Ready**: Successfully tested on 2+ hour videos. Implements smart chunking and exponential backoff to respect API rate limits.
 - **⚡ Asynchronous TTS**: Synthesizes dozens of audio segments concurrently using `asyncio` to drastically reduce processing time.
 - **⏱️ O(1) Audio Assembly**: Assembles hundreds of audio clips onto a master canvas using efficient timestamp-based overlays, rather than sequential appending.
+- **🎚️ Smart Audio Ducking & Stretching**: Dynamically adjusts TTS speed (capped at 1.5x to prevent chipmunk effects) to fit the original speaker's timeframe, and lowers the volume of the original background audio when the translated voice speaks.
 - **🛡️ Quality Gates**: Automatically halts processing if transcription confidence is too low or repetition loops are detected, preventing wasted API tokens.
+- **🧠 Robust LLM Parsing**: Implements resilient regex-based fallback parsers to recover from malformed or truncated JSON responses returned by the translation LLM.
 - **🔄 Smart Caching**: Every intermediate artifact (raw audio, JSON transcripts, translation batches, audio clips) is cached locally. If the script crashes or halts, it resumes exactly where it left off.
 - **🎭 Multi-Speaker Diarization (Stretch Goal)**: Uses HuggingFace's `pyannote.audio` to detect distinct speakers and dynamically assigns them different text-to-speech voices.
 
