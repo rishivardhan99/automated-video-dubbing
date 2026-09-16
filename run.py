@@ -267,7 +267,15 @@ def _run_pipeline(args, timings, total_start):
     # --------------------------------------------------
 
     t0 = time.time()
-    video_path = download_video(url)
+    from src.downloader import validate_youtube_url
+    if validate_youtube_url(url):
+        video_path = download_video(url)
+    else:
+        video_path = Path(url)
+        if not video_path.exists():
+            raise DownloadError(f"Local file does not exist: {video_path}")
+        logger.info("Using local video file: %s", video_path)
+        
     timings["Download"] = time.time() - t0
 
     print()
@@ -362,7 +370,6 @@ def _run_pipeline(args, timings, total_start):
 
     t0 = time.time()
     translator = GroqTranslator(
-        max_input_chars=5000,
         max_retries=5,
     )
     translation_path = translator.translate(

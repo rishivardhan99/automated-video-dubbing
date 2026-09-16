@@ -11,10 +11,8 @@ YouTube URL
 → Groq Whisper STT (transcription)
 → Transcript Quality Gate (PASS/WARN/FAIL)
 → Groq GPT-OSS-20B (translation)
-→ Edge-TTS (speech synthesis) *
-→ FFmpeg (final mux) *
-
-* = not yet implemented
+→ Edge-TTS (speech synthesis)
+→ FFmpeg (final mux)
 ```
 
 ## Setup
@@ -70,8 +68,14 @@ This will:
 
 ### 2. Full Pipeline
 
+The script accepts **both** YouTube URLs and local video files. If you pass a YouTube URL, it will download it. If you pass a local file, it will skip the download step and use your file directly.
+
 ```bash
+# Dub a YouTube video
 python run.py "https://www.youtube.com/watch?v=..."
+
+# Dub a local video file
+python run.py "data/input/my_video.mp4"
 ```
 
 If the transcript fails quality checks, the pipeline halts before making translation API calls. To force it to proceed (for testing):
@@ -125,3 +129,9 @@ Groq applies rate limits to both STT and chat completions. For long videos with 
 - The translator uses exponential backoff with retry-after header parsing
 - Large audio files are chunked to stay within upload limits
 - Monitor Groq dashboard for quota usage
+
+## Test Videos
+
+The system has been designed and tested to handle long-form content, including the following benchmark videos:
+- **30 Minute Benchmark**: [https://youtu.be/rgjb5Ubh90k?si=9oGMokSFtAJ6vuST](https://youtu.be/rgjb5Ubh90k?si=9oGMokSFtAJ6vuST)
+- **2 Hour Benchmark**: [https://youtu.be/RGKi6LSPDLU?si=Jps-EUb4Ej4JVUjY](https://youtu.be/RGKi6LSPDLU?si=Jps-EUb4Ej4JVUjY)

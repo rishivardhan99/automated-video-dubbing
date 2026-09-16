@@ -39,6 +39,7 @@ class SegmentMetadata:
     timing_violation: bool
     truncated: bool
     output_clip_path: str
+    final_duration_s: float
 
 
 class EdgeTTSSynthesizer:
@@ -55,6 +56,11 @@ class EdgeTTSSynthesizer:
         
         self.ducking_enabled = os.getenv("BACKGROUND_DUCKING", "true").lower() == "true"
         self.ducking_db = float(os.getenv("BACKGROUND_DUCK_DB", "8.0"))
+        
+        try:
+            self.max_concurrency = int(os.getenv("TTS_MAX_CONCURRENCY", "10"))
+        except ValueError:
+            self.max_concurrency = 10
 
     def _trim_silence(self, audio_segment: AudioSegment) -> AudioSegment:
         from pydub.silence import detect_nonsilent
@@ -150,119 +156,156 @@ class EdgeTTSSynthesizer:
         output_dir: Path,
     ) -> tuple[AudioSegment, list[SegmentMetadata]]:
         
+        logger.info(f"Starting concurrent TTS synthesis for {len(segments)} segments (Concurrency: {self.max_concurrency})")
+        
+        semaphore = asyncio.Semaphore(self.max_concurrency)
+        
+        async def process_segment(i: int, segment: dict):
+            async with semaphore:
+                seg_id = segment["id"]
+                start_s = segment["start"]
+                end_s = segment["end"]
+                text = segment["translated_text"]
+                
+                target_duration_s = end_s - start_s
+                
+                # Pre-TTS sanity check
+                est_duration_s = len(text) / 15.0
+                if target_duration_s > 0 and (est_duration_s / target_duration_s) > 1.25:
+                    logger.debug(
+                        "Segment %d translation likely exceeds available duration (est %.1fs vs target %.1fs)",
+                        seg_id, est_duration_s, target_duration_s
+                    )
+
+                # Available duration (to prevent overlaps, but allow natural length)
+                if i + 1 < len(segments):
+                    available_duration_s = max(target_duration_s, segments[i + 1]["start"] - start_s)
+                else:
+                    available_duration_s = target_duration_s
+
+                logger.debug(
+                    "Synthesizing segment %d (%.2fs - %.2fs, target duration: %.2fs, available: %.2fs)", 
+                    seg_id, start_s, end_s, target_duration_s, available_duration_s
+                )
+                
+                raw_clip_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_raw.mp3"
+                
+                # Variables for metadata tracking
+                raw_duration_s = 0.0
+                trimmed_duration_s = 0.0
+                required_speed_factor = 1.0
+                applied_speed_factor = 1.0
+                overflow_ms = 0
+                violation = False
+                truncated = False
+                final_clip_path = raw_clip_path
+                
+                # 1. Generate TTS
+                if not text.strip():
+                    logger.debug("Segment %d text is empty. Creating silent placeholder.", seg_id)
+                    audio_segment = AudioSegment.silent(duration=0)
+                    raw_clip_path.touch()
+                    final_duration_s = 0.0
+                else:
+                    await self._generate_tts_with_retry(text, raw_clip_path)
+                    
+                    # Offload pydub I/O to a thread so we don't block asyncio loop
+                    def process_audio():
+                        raw_audio = AudioSegment.from_file(str(raw_clip_path))
+                        return raw_audio
+                    
+                    raw_audio_segment = await asyncio.to_thread(process_audio)
+                    raw_duration_s = len(raw_audio_segment) / 1000.0
+                    
+                    # Trim silence
+                    audio_segment = await asyncio.to_thread(self._trim_silence, raw_audio_segment)
+                    trimmed_duration_s = len(audio_segment) / 1000.0
+                    removed_ms = len(raw_audio_segment) - len(audio_segment)
+                    logger.debug("Trimmed %d ms silence from segment %d. Raw: %.2fs, Trimmed: %.2fs", 
+                                removed_ms, seg_id, raw_duration_s, trimmed_duration_s)
+                    
+                    trimmed_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_trimmed.wav"
+                    await asyncio.to_thread(audio_segment.export, str(trimmed_path), format="wav")
+                    
+                    if target_duration_s > 0:
+                        required_speed_factor = trimmed_duration_s / target_duration_s
+
+                    # Apply time-stretching logic
+                    if required_speed_factor <= 1.05:
+                        final_clip_path = trimmed_path
+                    else:
+                        if required_speed_factor <= 1.25:
+                            applied_speed_factor = required_speed_factor
+                        else:
+                            applied_speed_factor = 1.25
+                            violation = True
+                            logger.debug(
+                                "[TIMING VIOLATION] Segment %d generated %.2fs audio for %.2fs target. Max 1.25x stretch applied.",
+                                seg_id, trimmed_duration_s, target_duration_s
+                            )
+
+                        final_clip_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_stretched.wav"
+                        await asyncio.to_thread(self._apply_atempo, trimmed_path, final_clip_path, applied_speed_factor)
+                        
+                        def load_final():
+                            return AudioSegment.from_file(str(final_clip_path))
+                        audio_segment = await asyncio.to_thread(load_final)
+
+                    # Overlap Prevention & Defensive Cutoff
+                    final_duration_s = len(audio_segment) / 1000.0
+                    if final_duration_s > available_duration_s:
+                        overflow_ms = int((final_duration_s - available_duration_s) * 1000)
+                        logger.debug("Segment %d overflows available duration by %d ms. Truncating with fade-out.", seg_id, overflow_ms)
+                        
+                        available_ms = int(available_duration_s * 1000)
+                        
+                        def truncate_audio():
+                            return audio_segment[:available_ms].fade_out(30)
+                        audio_segment = await asyncio.to_thread(truncate_audio)
+                        
+                        truncated = True
+                        violation = True
+                        final_duration_s = len(audio_segment) / 1000.0
+                
+                logger.info(f"Generated Segment {seg_id} | Final length: {final_duration_s:.2f}s")
+                
+                # Record metadata
+                meta = SegmentMetadata(
+                    id=seg_id,
+                    source_start=start_s,
+                    source_end=end_s,
+                    target_duration=target_duration_s,
+                    raw_tts_duration=raw_duration_s,
+                    trimmed_tts_duration=trimmed_duration_s,
+                    required_speed_factor=required_speed_factor,
+                    applied_speed_factor=applied_speed_factor,
+                    available_duration=available_duration_s,
+                    overflow_ms=overflow_ms,
+                    timing_violation=violation,
+                    truncated=truncated,
+                    output_clip_path=str(final_clip_path),
+                    final_duration_s=final_duration_s,
+                )
+                
+                return (i, start_s, audio_segment, meta)
+
+        # Create tasks and run concurrently
+        tasks = [process_segment(i, segment) for i, segment in enumerate(segments)]
+        results = await asyncio.gather(*tasks)
+        
+        # Sort by index to maintain chronology
+        results.sort(key=lambda x: x[0])
+        
         metadata_report = []
         
-        for i, segment in enumerate(segments):
-            seg_id = segment["id"]
-            start_s = segment["start"]
-            end_s = segment["end"]
-            text = segment["translated_text"]
-            
-            target_duration_s = end_s - start_s
-            
-            # Pre-TTS sanity check
-            est_duration_s = len(text) / 15.0
-            if target_duration_s > 0 and (est_duration_s / target_duration_s) > 1.25:
-                logger.warning(
-                    "WARNING: segment %d translation likely exceeds available duration (est %.1fs vs target %.1fs)",
-                    seg_id, est_duration_s, target_duration_s
-                )
-
-            # Available duration (to prevent overlaps)
-            if i + 1 < len(segments):
-                available_duration_s = segments[i + 1]["start"] - start_s
-            else:
-                available_duration_s = end_s - start_s
-
-            logger.info(
-                "Synthesizing segment %d (%.2fs - %.2fs, target duration: %.2fs, available: %.2fs)", 
-                seg_id, start_s, end_s, target_duration_s, available_duration_s
-            )
-            
-            raw_clip_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_raw.mp3"
-            
-            # Variables for metadata tracking
-            raw_duration_s = 0.0
-            trimmed_duration_s = 0.0
-            required_speed_factor = 1.0
-            applied_speed_factor = 1.0
-            overflow_ms = 0
-            violation = False
-            truncated = False
-            final_clip_path = raw_clip_path
-            
-            # 1. Generate TTS
-            if not text.strip():
-                logger.info("Segment %d text is empty. Creating silent placeholder.", seg_id)
-                audio_segment = AudioSegment.silent(duration=0)
-                raw_clip_path.touch()
-            else:
-                await self._generate_tts_with_retry(text, raw_clip_path)
-                raw_audio_segment = AudioSegment.from_file(str(raw_clip_path))
-                raw_duration_s = len(raw_audio_segment) / 1000.0
-                
-                # Trim silence
-                audio_segment = self._trim_silence(raw_audio_segment)
-                trimmed_duration_s = len(audio_segment) / 1000.0
-                removed_ms = len(raw_audio_segment) - len(audio_segment)
-                logger.info("Trimmed %d ms silence from segment %d. Raw: %.2fs, Trimmed: %.2fs", 
-                            removed_ms, seg_id, raw_duration_s, trimmed_duration_s)
-                
-                trimmed_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_trimmed.wav"
-                audio_segment.export(str(trimmed_path), format="wav")
-                
-                if target_duration_s > 0:
-                    required_speed_factor = trimmed_duration_s / target_duration_s
-
-                # Apply time-stretching logic
-                if required_speed_factor <= 1.05:
-                    final_clip_path = trimmed_path
-                else:
-                    if required_speed_factor <= 1.25:
-                        applied_speed_factor = required_speed_factor
-                    else:
-                        applied_speed_factor = 1.25
-                        violation = True
-                        logger.warning(
-                            "[TIMING VIOLATION] Segment %d generated %.2fs audio for %.2fs target. Max 1.25x stretch applied.",
-                            seg_id, trimmed_duration_s, target_duration_s
-                        )
-
-                    final_clip_path = output_dir / f"{job_prefix}_seg{seg_id:03d}_stretched.wav"
-                    self._apply_atempo(trimmed_path, final_clip_path, applied_speed_factor)
-                    audio_segment = AudioSegment.from_file(str(final_clip_path))
-
-                # Overlap Prevention & Defensive Cutoff
-                final_duration_s = len(audio_segment) / 1000.0
-                if final_duration_s > available_duration_s:
-                    overflow_ms = int((final_duration_s - available_duration_s) * 1000)
-                    logger.warning("Segment %d overflows available duration by %d ms. Truncating with fade-out.", seg_id, overflow_ms)
-                    
-                    available_ms = int(available_duration_s * 1000)
-                    audio_segment = audio_segment[:available_ms].fade_out(30)
-                    truncated = True
-                    violation = True
-            
-            # Record metadata
-            meta = SegmentMetadata(
-                id=seg_id,
-                source_start=start_s,
-                source_end=end_s,
-                target_duration=target_duration_s,
-                raw_tts_duration=raw_duration_s,
-                trimmed_tts_duration=trimmed_duration_s,
-                required_speed_factor=required_speed_factor,
-                applied_speed_factor=applied_speed_factor,
-                available_duration=available_duration_s,
-                overflow_ms=overflow_ms,
-                timing_violation=violation,
-                truncated=truncated,
-                output_clip_path=str(final_clip_path)
-            )
+        logger.info("Concurrency phase complete! Assembling TTS segments onto canvas...")
+        
+        # Sequentially place segments onto the master canvas
+        for _, start_s, audio_segment, meta in results:
             metadata_report.append(meta)
             
-            # Place on timeline
             start_ms = int(start_s * 1000)
+            final_duration_s = meta.final_duration_s
             
             # Background ducking
             if self.ducking_enabled and final_duration_s > 0:
@@ -275,8 +318,11 @@ class EdgeTTSSynthesizer:
                     after = canvas[end_ms:]
                     canvas = before + during + after
             
-            canvas = canvas.overlay(audio_segment, position=start_ms)
+            # Overlay
+            if final_duration_s > 0:
+                canvas = canvas.overlay(audio_segment, position=start_ms)
                 
+        logger.info("Assembly complete!")
         return canvas, metadata_report
 
     async def _generate_tts_with_retry(self, text: str, output_path: Path) -> None:

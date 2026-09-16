@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 from src.utils.logger import get_logger
-from src.utils.paths import TRANSLATIONS_DIR
+from src.utils.paths import TRANSLATIONS_DIR, TRANSLATION_BATCHES_DIR
 
 load_dotenv()
 
@@ -22,7 +22,6 @@ class GroqTranslator:
     def __init__(
         self,
         model_name: str | None = None,
-        max_input_chars: int = 5000,
         max_retries: int = 5,
     ) -> None:
 
@@ -41,8 +40,14 @@ class GroqTranslator:
                 "openai/gpt-oss-20b",
             )
         )
+        
+        try:
+            self.max_segments = int(os.getenv("TRANSLATION_MAX_SEGMENTS", "12"))
+            self.max_chars = int(os.getenv("TRANSLATION_MAX_CHARS", "3000"))
+        except ValueError:
+            self.max_segments = 12
+            self.max_chars = 3000
 
-        self.max_input_chars = max_input_chars
         self.max_retries = max_retries
 
         self.client = Groq(api_key=api_key)
@@ -100,10 +105,12 @@ class GroqTranslator:
             ]
 
         else:
+            video_id = transcript_path.stem
             translated_segments = (
                 self._translate_segments(
                     segments,
                     source_language,
+                    video_id
                 )
             )
 
@@ -154,32 +161,101 @@ class GroqTranslator:
         current_chars = 0
 
         for segment in segments:
-
             text = segment.get("text", "")
             text_length = len(text)
-
-            # A single unusually long segment gets its own batch.
-            if (
-                current_batch
-                and current_chars + text_length
-                > self.max_input_chars
-            ):
-                batches.append(current_batch)
-                current_batch = []
-                current_chars = 0
-
-            current_batch.append(segment)
-            current_chars += text_length
+            
+            if not current_batch:
+                current_batch.append(segment)
+                current_chars += text_length
+            else:
+                if len(current_batch) >= self.max_segments or (current_chars + text_length > self.max_chars):
+                    batches.append(current_batch)
+                    current_batch = [segment]
+                    current_chars = text_length
+                else:
+                    current_batch.append(segment)
+                    current_chars += text_length
 
         if current_batch:
             batches.append(current_batch)
 
         return batches
+        
+    def _translate_batch_adaptive(
+        self,
+        batch_segments: list[dict],
+        source_language: str | None,
+        context_before: list[dict],
+        context_after: list[dict],
+        batch_cache_path: Path | None,
+    ) -> list[dict]:
+        """
+        Translates a batch, bisecting it into smaller batches if it fails repeatedly.
+        """
+        # Check cache
+        if batch_cache_path and batch_cache_path.exists():
+            try:
+                with batch_cache_path.open("r", encoding="utf-8") as f:
+                    cached_data = json.load(f)
+                if isinstance(cached_data, list):
+                    logger.info("Loaded translation batch from cache: %s", batch_cache_path.name)
+                    return cached_data
+            except Exception as e:
+                logger.warning("Failed to load translation batch cache %s: %s", batch_cache_path, e)
+
+        try:
+            result = self._translate_batch(batch_segments, source_language, context_before, context_after)
+            # Save cache
+            if batch_cache_path:
+                batch_cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with batch_cache_path.open("w", encoding="utf-8") as f:
+                    json.dump(result, f, ensure_ascii=False, indent=2)
+            return result
+        except TranslationError as exc:
+            if len(batch_segments) > 1:
+                mid = len(batch_segments) // 2
+                logger.warning(
+                    "Batch failed, bisecting adaptive batch: %d -> %d + %d. Reason: %s", 
+                    len(batch_segments), mid, len(batch_segments) - mid, exc
+                )
+                first_half = batch_segments[:mid]
+                second_half = batch_segments[mid:]
+                
+                # Context for first half includes the start of second half
+                res1 = self._translate_batch_adaptive(
+                    first_half, 
+                    source_language, 
+                    context_before, 
+                    second_half[:2], 
+                    None # don't cache intermediate bisections to keep it simple, or cache to main
+                )
+                
+                # Context for second half includes the end of first half
+                res2 = self._translate_batch_adaptive(
+                    second_half, 
+                    source_language, 
+                    first_half[-2:], 
+                    context_after, 
+                    None
+                )
+                
+                combined = res1 + res2
+                
+                # Cache the combined success
+                if batch_cache_path:
+                    with batch_cache_path.open("w", encoding="utf-8") as f:
+                        json.dump(combined, f, ensure_ascii=False, indent=2)
+                
+                return combined
+            else:
+                logger.error("Cannot bisect single segment! ID: %s", batch_segments[0].get("id"))
+                raise
 
     def _translate_segments(
         self,
         segments: list[dict],
         source_language: str | None,
+        video_id: str,
     ) -> list[dict]:
 
         batches = self._build_batches(segments)
@@ -190,22 +266,35 @@ class GroqTranslator:
         )
 
         translated_segments = []
+        batch_cache_dir = TRANSLATION_BATCHES_DIR / video_id
+        batch_cache_dir.mkdir(parents=True, exist_ok=True)
 
         for batch_number, batch in enumerate(
             batches,
             start=1,
         ):
-
             logger.info(
                 "Translating batch %d/%d (%d segments)...",
                 batch_number,
                 len(batches),
                 len(batch),
             )
+            
+            # Find context windows
+            idx_start = segments.index(batch[0])
+            idx_end = segments.index(batch[-1])
+            
+            context_before = segments[max(0, idx_start - 2):idx_start]
+            context_after = segments[idx_end + 1:idx_end + 3]
+            
+            batch_cache_path = batch_cache_dir / f"batch_{batch_number:03d}.json"
 
-            translated_batch = self._translate_batch(
-                batch,
-                source_language,
+            translated_batch = self._translate_batch_adaptive(
+                batch_segments=batch,
+                source_language=source_language,
+                context_before=context_before,
+                context_after=context_after,
+                batch_cache_path=batch_cache_path
             )
 
             translated_segments.extend(
@@ -235,15 +324,20 @@ class GroqTranslator:
         self,
         segments: list[dict],
         source_language: str | None,
+        context_before: list[dict],
+        context_after: list[dict],
     ) -> list[dict]:
 
-        segment_payload = [
+        target_payload = [
             {
                 "id": segment["id"],
                 "text": segment["text"],
             }
             for segment in segments
         ]
+        
+        ctx_before_payload = [{"id": s["id"], "text": s["text"]} for s in context_before]
+        ctx_after_payload = [{"id": s["id"], "text": s["text"]} for s in context_after]
 
         prompt = f"""
 Translate spoken dialogue from
@@ -259,33 +353,33 @@ speech-recognition errors.
 Examples:
 - phonetic renderings of English words may need to be restored to English
 - names, cities, exams, organizations, and technical terms should be
-  recognized when context strongly supports them (e.g. "ఎమీబియే" = MBBS, 
-  "నీడ్" = NEET, "ఫోరం కంత్రిస్" = Foreign countries, "విజే వాడా" = Vijayawada)
+  recognized when context strongly supports them
 
-However:
+Rules:
 - do not invent facts
 - do not add information not reasonably supported by the source/context
 - preserve the speaker's intent
 - prefer natural spoken English over literal translation
 - keep the result concise enough for the original timestamp
 - preserve every segment ID exactly
-- return exactly one translation for every segment
+- return exactly one translation for every target segment
 - never merge segments
 - never split segments
 - preserve the original segment order
 - CRITICAL: Never return meta-commentary like "I don't understand" 
-  or "Inaudible". If a segment is complete gibberish, do your best 
-  to infer from context, or return an empty string "".
+  or "Inaudible". If a segment is complete gibberish, infer from context, 
+  or return an empty string "".
 
-Input segments:
+### CONTEXT BEFORE (DO NOT TRANSLATE THESE):
+{json.dumps(ctx_before_payload, ensure_ascii=False, indent=2) if ctx_before_payload else "None"}
 
-{json.dumps(
-    segment_payload,
-    ensure_ascii=False,
-    indent=2,
-)}
+### TARGET SEGMENTS (TRANSLATE ONLY THESE):
+{json.dumps(target_payload, ensure_ascii=False, indent=2)}
 
-Return translations using the required JSON schema.
+### CONTEXT AFTER (DO NOT TRANSLATE THESE):
+{json.dumps(ctx_after_payload, ensure_ascii=False, indent=2) if ctx_after_payload else "None"}
+
+Return translations ONLY for the TARGET SEGMENTS using the required JSON schema.
 """
 
         for attempt in range(
@@ -304,9 +398,7 @@ Return translations using the required JSON schema.
                                 "role": "system",
                                 "content": (
                                     "You are a professional "
-                                    "Telugu-to-English and "
-                                    "multilingual video-dubbing "
-                                    "translator. "
+                                    "multilingual video-dubbing translator. "
                                     "Return only the requested "
                                     "structured data."
                                 ),
@@ -426,6 +518,7 @@ Return translations using the required JSON schema.
         exc: Exception,
         attempt: int,
     ) -> float:
+        import re
 
         # Conservative exponential backoff.
         base_delay = min(
@@ -435,11 +528,20 @@ Return translations using the required JSON schema.
 
         message = str(exc).lower()
 
+        # Check for Groq's "please try again in XmYs" or "please try again in Xs" format
+        match = re.search(r"please try again in (?:(\d+)m)?([\d\.]+)s", message)
+        if match:
+            minutes = int(match.group(1)) if match.group(1) else 0
+            seconds = float(match.group(2))
+            total_seconds = (minutes * 60) + seconds
+            return max(total_seconds + 1.0, float(base_delay))
+
         # Groq's 429 response may expose
         # a retry-after duration.
         for token in [
             "retry-after:",
             "retry after",
+            "x-ratelimit-reset"
         ]:
 
             if token in message:
@@ -449,10 +551,10 @@ Return translations using the required JSON schema.
                         .split(token, 1)[1]
                         .split()[0]
                     )
-
+                    after = ''.join(c for c in after if c.isdigit() or c == '.')
                     return max(
                         float(after),
-                        base_delay,
+                        float(base_delay),
                     )
 
                 except (
@@ -461,7 +563,8 @@ Return translations using the required JSON schema.
                 ):
                     pass
 
-        return float(base_delay)
+        import random
+        return float(base_delay) + random.uniform(0.1, 1.0)
 
     @staticmethod
     def _validate_batch(

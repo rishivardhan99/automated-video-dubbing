@@ -53,7 +53,7 @@ def download_video(url: str) -> Path:
 
     output_template = str(INPUT_DIR / "%(title)s.%(ext)s")
 
-    options = {
+    base_options = {
         # Prefer a reasonable MP4 video + M4A audio combination.
         "format": (
             "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
@@ -82,35 +82,59 @@ def download_video(url: str) -> Path:
     logger.info("Starting video download...")
     logger.info("URL: %s", url)
 
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=True)
+    strategies = []
+    
+    if Path("cookies.txt").exists():
+        strategies.append(("cookies.txt", {"cookiefile": "cookies.txt"}))
+        
+    strategies.extend([
+        ("Default Client", {}),
+        ("Edge Cookies", {"cookiesfrombrowser": ("edge", None, None, None)}),
+        ("Chrome Cookies", {"cookiesfrombrowser": ("chrome", None, None, None)}),
+        ("Firefox Cookies", {"cookiesfrombrowser": ("firefox", None, None, None)}),
+    ])
 
-            if info is None:
-                raise DownloadError("yt-dlp returned no video information.")
+    last_error = None
 
-            downloaded_path = Path(ydl.prepare_filename(info))
+    for strategy_name, extra_options in strategies:
+        options = base_options.copy()
+        options.update(extra_options)
 
-            # If separate streams were merged into MP4,
-            # yt-dlp may have changed the final extension.
-            if not downloaded_path.exists():
-                possible_mp4 = downloaded_path.with_suffix(".mp4")
+        if extra_options:
+            logger.info("Retrying download using strategy: %s...", strategy_name)
 
-                if possible_mp4.exists():
-                    downloaded_path = possible_mp4
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=True)
 
-            if not downloaded_path.exists():
-                raise DownloadError(
-                    "Download appeared to succeed, but the output file "
-                    "could not be found."
-                )
+                if info is None:
+                    raise DownloadError("yt-dlp returned no video information.")
 
-            logger.info("Download complete.")
-            logger.info("Saved to: %s", downloaded_path)
+                downloaded_path = Path(ydl.prepare_filename(info))
 
-            return downloaded_path
+                # If separate streams were merged into MP4,
+                # yt-dlp may have changed the final extension.
+                if not downloaded_path.exists():
+                    possible_mp4 = downloaded_path.with_suffix(".mp4")
 
-    except yt_dlp.utils.DownloadError as exc:
-        raise DownloadError(
-            f"Failed to download the YouTube video: {exc}"
-        ) from exc
+                    if possible_mp4.exists():
+                        downloaded_path = possible_mp4
+
+                if not downloaded_path.exists():
+                    raise DownloadError(
+                        "Download appeared to succeed, but the output file "
+                        "could not be found."
+                    )
+
+                logger.info("Download complete.")
+                logger.info("Saved to: %s", downloaded_path)
+
+                return downloaded_path
+
+        except Exception as exc:
+            logger.warning("Strategy '%s' failed: %s", strategy_name, exc)
+            last_error = exc
+
+    raise DownloadError(
+        f"All download strategies failed. YouTube bot detection blocked the download. Last error: {last_error}"
+    ) from last_error
