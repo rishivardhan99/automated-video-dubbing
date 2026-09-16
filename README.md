@@ -133,5 +133,5 @@ Groq applies rate limits to both STT and chat completions. For long videos with 
 ## Test Videos
 
 The system has been designed and tested to handle long-form content, including the following benchmark videos:
-- **30 Minute Benchmark**: [https://youtu.be/rgjb5Ubh90k?si=9oGMokSFtAJ6vuST](https://youtu.be/rgjb5Ubh90k?si=9oGMokSFtAJ6vuST)
+- **30 Minute Benchmark**: [https://youtu.be/BLEYCyrLpkI?si=lon0nuzER4B1r36y](https://youtu.be/BLEYCyrLpkI?si=lon0nuzER4B1r36y)
 - **2 Hour Benchmark**: [https://youtu.be/RGKi6LSPDLU?si=Jps-EUb4Ej4JVUjY](https://youtu.be/RGKi6LSPDLU?si=Jps-EUb4Ej4JVUjY)
