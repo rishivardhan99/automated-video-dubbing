@@ -3,4 +3,4 @@
 # The core pipeline (SPEAKER_MODE=single) does NOT need these.
 torch
 torchaudio
-pyannote.audio
+pyannote.audio<4.0.0
