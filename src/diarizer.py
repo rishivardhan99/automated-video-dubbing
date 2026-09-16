@@ -48,6 +48,15 @@ class PyAnnoteDiarizer:
             return
 
         try:
+            # Patch torchaudio to prevent AttributeError in newer versions
+            import torchaudio
+            if not hasattr(torchaudio, "AudioMetaData"):
+                class _DummyMetaData:
+                    pass
+                torchaudio.AudioMetaData = _DummyMetaData
+                if not hasattr(torchaudio, "info"):
+                    torchaudio.info = lambda *args, **kwargs: _DummyMetaData()
+
             from pyannote.audio import Pipeline
         except ImportError as exc:
             raise DiarizationError(
