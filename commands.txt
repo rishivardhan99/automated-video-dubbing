@@ -66,3 +66,4 @@ overriding SPEAKER_MODE=diarized in your .env without editing it.
 
 Command:
 python run.py --speaker-mode single "https://youtu.be/YOUR_VIDEO_ID"
+python run.py --speaker-mode diarized "YOUTUBE_URL"

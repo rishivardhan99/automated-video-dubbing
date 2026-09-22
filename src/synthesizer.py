@@ -2,18 +2,16 @@ import asyncio
 import json
 import os
 import subprocess
-import time
-from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional
+from pathlib import Path
 
-from pydub import AudioSegment
 import edge_tts
 from dotenv import load_dotenv
+from pydub import AudioSegment
 
+from src.audio import get_audio_duration
 from src.utils.logger import get_logger
 from src.utils.paths import AUDIO_DIR
-from src.audio import get_audio_duration
 
 load_dotenv()
 

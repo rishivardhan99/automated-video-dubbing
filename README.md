@@ -4,6 +4,10 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Status](https://img.shields.io/badge/status-production_ready-success)
 
+<div align="center">
+  <img src="docs/architecture_pipeline.jpg" alt="Automated Video Dubbing Architecture Pipeline" width="100%">
+</div>
+
 A high-performance, fully automated pipeline that translates and dubs videos into English. Designed for long-form content (2+ hours), the system features asynchronous API calls, robust rate-limit handling, automatic audio timeline assembly, and optional multi-speaker diarization.
 
 ---

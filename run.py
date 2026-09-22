@@ -8,41 +8,34 @@ from pathlib import Path
 from src.audio import (
     AudioExtractionError,
     extract_audio,
-    get_audio_duration,
     extract_benchmark_audio,
+    get_audio_duration,
     mux_audio_video,
 )
-
 from src.downloader import (
     DownloadError,
     download_video,
 )
-
-from src.transcribers import (
-    GroqTranscriber,
-    TranscriptionError,
+from src.quality import (
+    QualityState,
+    analyze_transcript,
 )
-
 from src.separator import (
     AudioSeparator,
     SeparationError,
 )
-
-from src.translator import (
-    GroqTranslator,
-    TranslationError,
-)
-
 from src.synthesizer import (
     EdgeTTSSynthesizer,
     SynthesisError,
 )
-
-from src.quality import (
-    analyze_transcript,
-    QualityState,
+from src.transcribers import (
+    GroqTranscriber,
+    TranscriptionError,
 )
-
+from src.translator import (
+    GroqTranslator,
+    TranslationError,
+)
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -214,7 +207,7 @@ def _run_benchmark(args, timings):
     print("=" * 60)
     print()
     print(
-        f"Provider:        groq"
+        "Provider:        groq"
     )
     print(
         f"Model:           {transcriber.model_name}"
@@ -398,7 +391,7 @@ def _run_pipeline(args, timings, total_start):
         t0 = time.time()
 
         # Lazy import — only when diarized mode is active
-        from src.diarizer import PyAnnoteDiarizer, DiarizationError
+        from src.diarizer import DiarizationError, PyAnnoteDiarizer
         from src.speaker_voices import build_speaker_voice_map
 
         try:
@@ -464,7 +457,7 @@ def _run_pipeline(args, timings, total_start):
     synthesizer = EdgeTTSSynthesizer(
         speaker_voice_map=speaker_voice_map,
     )
-    output_audio, meta_report = synthesizer.synthesize(
+    output_audio, _meta_report = synthesizer.synthesize(
         translation_path,
         audio_path,
         bg_music_path=bg_music_path,

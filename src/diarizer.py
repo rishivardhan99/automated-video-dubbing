@@ -138,9 +138,9 @@ class PyAnnoteDiarizer:
 
         # Bypass torchaudio/torchcodec file loading bugs on Windows
         # by using pydub to load the audio into a torch tensor explicitly.
-        from pydub import AudioSegment
-        import torch
         import numpy as np
+        import torch
+        from pydub import AudioSegment
 
         audio = AudioSegment.from_file(str(audio_path))
         # Pyannote expects 16kHz mono audio by default

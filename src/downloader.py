@@ -6,7 +6,6 @@ import yt_dlp
 from src.utils.logger import get_logger
 from src.utils.paths import INPUT_DIR
 
-
 logger = get_logger(__name__)
 
 

@@ -1,6 +1,6 @@
-from pathlib import Path
 import subprocess
 import wave
+from pathlib import Path
 
 from src.utils.logger import get_logger
 from src.utils.paths import AUDIO_DIR, OUTPUT_DIR

@@ -1,17 +1,17 @@
+import difflib
 import json
 import math
 import os
 import subprocess
 import time
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import difflib
+from pathlib import Path
 
 from dotenv import load_dotenv
 from groq import Groq
 
 from src.utils.logger import get_logger
-from src.utils.paths import TRANSCRIPTS_DIR, AUDIO_DIR, STT_CHUNKS_DIR
+from src.utils.paths import AUDIO_DIR, STT_CHUNKS_DIR, TRANSCRIPTS_DIR
 
 load_dotenv()
 

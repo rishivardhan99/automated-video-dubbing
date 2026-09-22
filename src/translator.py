@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from groq import Groq
 
 from src.utils.logger import get_logger
-from src.utils.paths import TRANSLATIONS_DIR, TRANSLATION_BATCHES_DIR
+from src.utils.paths import TRANSLATION_BATCHES_DIR, TRANSLATIONS_DIR
 
 load_dotenv()
 

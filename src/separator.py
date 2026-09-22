@@ -4,7 +4,6 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from src.utils.logger import get_logger
 
@@ -27,7 +26,7 @@ class AudioSeparator:
     def __init__(self, mode: str = "none"):
         self.mode = mode.lower()
 
-    def separate(self, audio_path: Path) -> Optional[SeparationResult]:
+    def separate(self, audio_path: Path) -> SeparationResult | None:
         if self.mode == "none":
             logger.info("Audio separation disabled (AUDIO_SEPARATION=none)")
             return None
